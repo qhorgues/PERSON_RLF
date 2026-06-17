@@ -5,8 +5,8 @@ import torch.nn as nn
 from loguru import logger
 
 from model import objectives
-from model.layers import Transformer, QuickGELU, LayerNorm
-
+from model.layers import LayerNorm, QuickGELU, Transformer
+from model.stn import STNReIDModule
 
 TASK_LIST = ["ITC", "SDM", "CMPM", "ID", "MLM", "SS", "MVS", "RITC", "CITC", "NITC"]
 
@@ -105,6 +105,12 @@ class TBPS(nn.Module):
             nn.init.normal_(self.mlm_head.dense.weight, std=fc_std)
             nn.init.normal_(self.mlm_head.fc.weight, std=proj_std)
 
+        # STN module (STNReID, Phase 2) — gated by the top-level `stn.enabled` config.
+        # The `stn*` name makes its params part of the shared "heads" subspace (FedSH).
+        stn_cfg = config.get("stn", None)
+        if stn_cfg is not None and stn_cfg.enabled:
+            self.stn_module = STNReIDModule(self.encode_image, config)
+
     def _build_mlp(self, in_dim=512, mlp_dim=128, out_dim=512):
         return nn.Sequential(
             nn.Linear(in_dim, mlp_dim),
@@ -199,7 +205,7 @@ class TBPS(nn.Module):
 
         return pooler_output
 
-    def prepare_sim_targets(self, pids, use_sigmoid=False):
+    def prepare_sim_targets(self, pids, use_sigmoid=True):
         """
         Prepare similarity targets for constrative learning.
 
@@ -445,6 +451,15 @@ class TBPS(nn.Module):
 
             acc = (pred[mlm_label_idx] == mlm_labels[mlm_label_idx]).float().mean()
             ret.update({"mlm_acc": acc})
+
+        # Compute STN loss (STNReID eq. 5): align partial and affined ReID features.
+        if getattr(self, "stn_module", None) is not None and "partial_images" in batch:
+            partial = batch["partial_images"]
+            affined = self.stn_module.transform(images, partial)
+            f_p = self.encode_image(partial)
+            f_a = self.encode_image(affined)
+            stn_loss = self.stn_module.compute_stn_loss(f_p, f_a)
+            ret.update({"stn_loss": stn_loss * self.config.stn.stn_loss_weight})
 
         return ret
 

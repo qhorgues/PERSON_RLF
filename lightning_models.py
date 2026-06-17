@@ -3,6 +3,7 @@ from typing import Optional, Dict, List, Any, Tuple
 from dataclasses import dataclass, field
 
 import lightning as L
+import numpy as np
 import torch
 import torch.nn.functional as F
 from loguru import logger
@@ -110,6 +111,12 @@ class LitTBPS(L.LightningModule):
         self.weights = None
         self.train_set_length = train_set_length
 
+        # FedProx (Phase 2) — neutral by default; set per-round by the Flower client
+        # via `federated.fedprox.attach_fedprox_hook`. proximal_mu=0 -> no-op.
+        self.proximal_mu = 0.0
+        self.global_subspace = None
+        self.subspace_keys = None
+
     ############# SETTING UP LORA ######################
     def setup_lora(self, lora_config: Dict) -> None:
         """Setup LORA for the model"""
@@ -185,6 +192,42 @@ class LitTBPS(L.LightningModule):
 
     ############# END INFERENCE FUNCTIONS #############
 
+    ############# FEDERATED LEARNING FUNCTIONS #############
+    def get_subspace_state_dict(self, selector) -> List[np.ndarray]:
+        """Extract the shared subspace (`SubspaceSelector.extract`) for Flower."""
+        return selector.extract(self)
+
+    def load_subspace_state_dict(self, selector, ndarrays: List[np.ndarray]) -> None:
+        """Inject a shared subspace (`SubspaceSelector.inject`) received from Flower."""
+        selector.inject(self, ndarrays)
+
+    def freeze_reid(self) -> None:
+        """Freeze the ReID backbone + heads (everything except the STN module).
+
+        Used by the STN 2-stage policy (STNReID §III-B) so Stage 1 trains a strong STN
+        on top of a frozen (weak) ReID. Must be called before `Trainer.fit` so the
+        optimizer/scheduler are built over the right trainable set.
+        """
+        for name, param in self.model.named_parameters():
+            if "stn" not in name:
+                param.requires_grad = False
+
+    def unfreeze_reid(self) -> None:
+        """Unfreeze the ReID backbone + heads (Stage 2), honoring `backbone.freeze.*`."""
+        freeze_vision = self.config.backbone.freeze.vision
+        freeze_text = self.config.backbone.freeze.text
+        for name, param in self.model.named_parameters():
+            if "stn" in name:
+                continue
+            if "vision_model" in name:
+                param.requires_grad = not freeze_vision
+            elif "text_model" in name:
+                param.requires_grad = not freeze_text
+            else:
+                param.requires_grad = True
+
+    ############# END FEDERATED LEARNING FUNCTIONS #############
+
     ############# TRAINING FUNCTIONS #############
     def training_step(self, batch: Dict[str, Any], batch_idx: int) -> torch.Tensor:
         """
@@ -204,6 +247,16 @@ class LitTBPS(L.LightningModule):
 
             ret = self.model(batch, alpha, self.weights)
             loss = sum(v for k, v in ret.items() if k.endswith("loss"))
+
+            # FedProx proximal term (Phase 2) over the shared subspace, if enabled.
+            if self.proximal_mu > 0 and self.global_subspace is not None:
+                from federated.fedprox import proximal_term
+
+                prox = proximal_term(
+                    self, self.global_subspace, self.subspace_keys, self.proximal_mu
+                )
+                loss = loss + prox
+                self.log("prox_loss", prox, on_step=True, on_epoch=True, prog_bar=False)
 
             # Log metrics
             self._log_training_metrics(ret, alpha, loss, epoch, batch_idx)

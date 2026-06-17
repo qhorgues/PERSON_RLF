@@ -1,20 +1,28 @@
 # config/config.yaml
 defaults:
-  - _self_
-  - dataset: cuhk_pedes
-  - loss: tbps_clip
-  - aug: siglip
-  - trainer: tbps_clip
-  - optimizer: tbps_clip_no_decay
-  - scheduler: tbps_clip
-  - tokenizer: m_siglip
-  - backbone: m_siglip
-  - logger: default
+    - _self_
+    - dataset: cuhk_pedes
+    - loss: tbps_clip
+    - aug: siglip
+    - trainer: tbps_clip
+    - optimizer: tbps_clip_no_decay
+    - scheduler: tbps_clip
+    - tokenizer: m_siglip
+    - backbone: m_siglip
+    - logger: default
 
 training: true
 dataset_root_dir: .
 distributed: false
-img_size_str: 
+img_size_str:
 img_size: ${eval:${img_size_str}}
 seed: 2307
 do_clipfit: false
+
+# STN (STNReID, Phase 2) — partial/occluded-image robustness. Disabled by default;
+# source of truth for the model + data pipeline (config.federated.stn mirrors `enabled`).
+stn:
+    enabled: false
+    partial_min: 0.2
+    partial_max: 0.6
+    stn_loss_weight: 1.0

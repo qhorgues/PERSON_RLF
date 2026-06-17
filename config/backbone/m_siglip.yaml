@@ -4,15 +4,15 @@ config_type: model.siglip.configuration_siglip.SiglipConfig
 original_model_include_cls_token: false
 # text config
 text_config:
-  vocab_size: ${tokenizer.vocab_size}
-  max_position_embeddings: ${tokenizer.model_max_length}
-  attention_dropout: 0.05
+    vocab_size: ${tokenizer.vocab_size}
+    max_position_embeddings: ${tokenizer.model_max_length}
+    attention_dropout: 0.05
 vision_config:
-  image_size: ${img_size}
-  patch_size: 16
+    image_size: ${img_size}
+    patch_size: 16
 embedding_dim: 768
 use_sigmoid: true
 freeze:
-  vision: false
-  text: false
+    vision: false
+    text: false
 num_epoch_for_boosting: 0

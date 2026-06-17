@@ -1,0 +1,9 @@
+# config/m_siglip_federated.yaml
+# Federated counterpart of config/m_siglip.yaml: inherits the full centralized
+# config and adds the `federated` group (config/federated/default.yaml).
+defaults:
+    - m_siglip
+    - federated: default
+    - _self_
+
+training: true

@@ -44,21 +44,13 @@ def compute_sdm(
     text_proj_image = logit_scale * t2i_cosine_theta + logit_bias
 
     if use_sigmoid:
-        raise NotImplementedError(
-            "The sigmoid version of the loss is not implemented yet."
-        )
-        # logger.debug("Experimental feature")
-        # Calculate the score using sigmoid
-        t2i_pred = F.sigmoid(text_proj_image)
-        # Normalize the sigmoid probability to 0-1 range
-        t2i_pred = t2i_pred / (t2i_pred.sum(dim=1, keepdim=True))
-        # REMINDER: KL DIVERGENCE (y1 || y2) = y1 * (log(y1) - log(y2))
-        # Encourage the prediction to be sharper within a batch
+        t2i_pred = torch.sigmoid(text_proj_image)
+        t2i_pred = t2i_pred / (t2i_pred.sum(dim=1, keepdim=True) + epsilon)
+
         t2i_loss = t2i_pred * (
-            torch.log(t2i_pred) - torch.log(labels_distribute + epsilon)
+            torch.log(t2i_pred + epsilon) - torch.log(labels_distribute + epsilon)
         )
-        # Add additional weights to some ids inside the batch
-        if weights:
+        if weights is not None:
             t2i_loss = weights * t2i_loss
         loss = torch.mean(torch.sum(t2i_loss, dim=1))
 
@@ -256,38 +248,30 @@ def compute_ritc(
     use_sigmoid,
     eps=1e-2,
 ):
-    """
-    Compute the reverse image-text contrastive loss
-
-    Args:
-        image_features: image features after pooling
-        text_features: text features after pooling
-        logit_scale: scaling factor for the logits
-    """
-    # Normalize the features
     image_features = F.normalize(image_features, dim=1, p=2)
     text_features = F.normalize(text_features, dim=1, p=2)
-
     sim_i2t = logit_scale * image_features @ text_features.t() + logit_bias
     sim_t2i = sim_i2t.t()
 
     if use_sigmoid:
-        raise NotImplementedError(
-            "The sigmoid version of the loss is not implemented yet."
+        sim_targets_shifted = (sim_targets + 1) / 2
+        sim_targets_norm = sim_targets_shifted / (
+            sim_targets_shifted.sum(dim=1, keepdim=True) + eps
         )
-        sim_targets = (sim_targets + 1) / 2
-        sim_targets = sim_targets / (sim_targets.sum(dim=1, keepdim=True))
-        target_prob = (sim_targets + eps).log()
-        prob = F.sigmoid(sim_i2t)
-        # normalize the probability
-        prob = prob / (prob.sum(dim=1, keepdim=True) + eps)
-        loss = F.kl_div(target_prob, prob, log_target=True, reduction="batchmean")
 
+        prob = torch.sigmoid(sim_i2t)
+        prob = prob / (prob.sum(dim=1, keepdim=True) + eps)
+
+        loss = F.kl_div(
+            torch.log(prob + eps),
+            sim_targets_norm,
+            log_target=False,
+            reduction="batchmean",
+        )
     else:
-        target_prob = (sim_targets + 1e-2).log()
+        target_prob = F.log_softmax((sim_targets + 1e-2).log(), dim=1)
         prob_i2t = F.log_softmax(sim_i2t, dim=1)
         prob_t2i = F.log_softmax(sim_t2i, dim=1)
-
         kl_img = F.kl_div(target_prob, prob_i2t, log_target=True, reduction="batchmean")
         kl_txt = F.kl_div(target_prob, prob_t2i, log_target=True, reduction="batchmean")
         loss = (kl_img + kl_txt) / 2

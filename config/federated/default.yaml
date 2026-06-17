@@ -1,0 +1,35 @@
+# config/federated/default.yaml
+# Phase 1 (FedAvg, no STN) hyperparameters for trainer_federated.py
+
+num_clients: 8
+num_rounds: 30
+local_epochs: 1
+fraction_fit: 1.0
+fraction_evaluate: 1.0
+min_fit_clients: 2
+min_evaluate_clients: 2
+min_available_clients: 8
+
+algorithm: fedavg # fedavg | fedprox
+proximal_mu: 0.01 # FedProx (Phase 2)
+
+subspace: text_tower+heads # full | text_tower | vision_tower | heads_only | text_tower+heads | lora
+custom_subspace_keys: null
+
+partition:
+  type: identity_dirichlet # identity_dirichlet | per_dataset (stub)
+  alpha: 0.5 # smaller -> stronger non-IID
+  seed: ${seed}
+
+stn: # Phase 2 - option (a). Model/data params live in the top-level `stn:` block;
+  # here we only keep the FL-specific 2-stage round policy and mirror `enabled`.
+  enabled: ${stn.enabled} # single source of truth = top-level config.stn.enabled
+  two_stage:
+    stage1_rounds: [0, 5] # STN trained, ReID weak/frozen
+    stage2_rounds: [5, 30] # STN frozen, ReID fine-tuned
+
+state_dir: ./fl_state
+
+client_resources:
+  num_gpus: 1.0 # mono-GPU -> clients run sequentially
+  num_cpus: 4

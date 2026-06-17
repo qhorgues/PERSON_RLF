@@ -1,10 +1,11 @@
 import warnings
 from random import Random
+from typing import List, Optional, Tuple
 
 import pytorch_lightning as pl
 from lightning.pytorch.utilities import CombinedLoader
-from torch.utils.data import DataLoader
 from loguru import logger
+from torch.utils.data import DataLoader
 
 from data.augmentation.transform import build_image_aug_pool, build_text_aug_pool
 from data.bases import (
@@ -13,16 +14,16 @@ from data.bases import (
     ImageTextMLMDataset,
     TextDataset,
 )
+from data.cuhk_10_percent_vn3k_mix import TenPercentCUHK_VN3KMIX
 from data.cuhkpedes import CUHKPEDES
 from data.icfgpedes import ICFGPEDES
 from data.rstpreid import RSTPReid
 from data.sampler import RandomIdentitySampler
+from data.vn3k_en import VN3K_EN
 
 # from data.sampler_ddp import RandomIdentitySampler_DDP
 from data.vn3k_mixed import VN3K_MIXED
 from data.vn3k_vi import VN3K_VI
-from data.vn3k_en import VN3K_EN
-from data.cuhk_10_percent_vn3k_mix import TenPercentCUHK_VN3KMIX
 
 # from utils.comm import get_world_size
 from utils.tokenizer_utils import get_tokenizer
@@ -33,7 +34,16 @@ warnings.filterwarnings("ignore", category=UserWarning)
 
 
 class TBPSDataModule(pl.LightningDataModule):
-    def __init__(self, config):
+    def __init__(
+        self,
+        config,
+        client_id: int = None,
+        num_clients: int = 1,
+        partition_samples: Optional[List[Tuple]] = None,
+    ):
+        self.client_id = client_id
+        self.num_clients = num_clients
+        self.partition_samples = partition_samples
         super().__init__()
         __factory = {
             "CUHK-PEDES": CUHKPEDES,
@@ -67,6 +77,13 @@ class TBPSDataModule(pl.LightningDataModule):
         self.std = self.config.aug.img.std
 
     def setup(self, stage=None):
+        if self.partition_samples is not None:
+            self.dataset.train = self.partition_samples
+            logger.info(
+                f"Using federated partition for client {self.client_id}: "
+                f"{len(self.dataset.train)} samples."
+            )
+
         if self.config.dataset.proportion:
             if self.config.dataset.dataset_name == "TEN_PERCENT_CUHK_VN3K_MIX":
                 raise NotImplementedError(
@@ -103,6 +120,12 @@ class TBPSDataModule(pl.LightningDataModule):
             )
 
         if stage == "fit" or stage is None:
+            # STN (STNReID): emit a simulated partial view per sample when enabled.
+            stn_cfg = self.config.get("stn", None)
+            partial_image = bool(stn_cfg.enabled) if stn_cfg else False
+            partial_min = stn_cfg.partial_min if stn_cfg else 0.2
+            partial_max = stn_cfg.partial_max if stn_cfg else 0.6
+
             if self.config.loss.MLM:
                 self.train_set = ImageTextMLMDataset(
                     dataset=self.dataset.train,
@@ -117,6 +140,9 @@ class TBPSDataModule(pl.LightningDataModule):
                     is_train=True,
                     mean=self.mean,
                     std=self.std,
+                    partial_image=partial_image,
+                    partial_min=partial_min,
+                    partial_max=partial_max,
                 )
             else:
                 self.train_set = ImageTextDataset(
@@ -132,6 +158,9 @@ class TBPSDataModule(pl.LightningDataModule):
                     is_train=True,
                     mean=self.mean,
                     std=self.std,
+                    partial_image=partial_image,
+                    partial_min=partial_min,
+                    partial_max=partial_max,
                 )
 
             logger.info("Validation set is available")

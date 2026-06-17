@@ -11,6 +11,7 @@ from .augmentation.transform import (
     get_image_transform,
     get_text_transform,
 )
+from .augmentation.partial import generate_partial_image
 from utils.iotools import read_image
 
 logger = logging.getLogger(__name__)
@@ -70,6 +71,9 @@ class PreloadedDataset(Dataset):
         is_train: bool = True,
         mean: Tuple[float, float, float] = (0.485, 0.456, 0.406),
         std: Tuple[float, float, float] = (0.229, 0.224, 0.225),
+        partial_image: bool = False,
+        partial_min: float = 0.2,
+        partial_max: float = 0.6,
     ):
         """
         Base class for all datasets that are preloaded into memory
@@ -100,10 +104,24 @@ class PreloadedDataset(Dataset):
         self.is_train = is_train
         self.mean = mean
         self.std = std
+        self.partial_image = partial_image
+        self.partial_min = partial_min
+        self.partial_max = partial_max
 
         if self.ss_aug:
             self.ss_image_transform = get_self_supervised_augmentation(
                 self.image_size, self.mean, self.std
+            )
+
+        if self.partial_image:
+            # Deterministic resize+normalize so the partial crop matches the holistic
+            # image size (required by F.grid_sample in the STN module).
+            self.partial_transform = get_image_transform(
+                aug_pool=None,
+                size=self.image_size,
+                mean=self.mean,
+                std=self.std,
+                is_train=False,
             )
 
     def __len__(self):
@@ -208,6 +226,13 @@ class ImageTextDataset(PreloadedDataset):
                     "ss_images2": ss_aug2,
                 }
             )
+
+        if self.partial_image:
+            # Simulated partial/occluded view for the STN module (STNReID).
+            partial_pil = generate_partial_image(
+                original_img, self.partial_min, self.partial_max
+            )
+            ret["partial_images"] = self.partial_transform(partial_pil)
 
         return ret
 
@@ -364,6 +389,13 @@ class ImageTextMLMDataset(PreloadedDataset):
                     "ss_images2": ss_aug2,
                 }
             )
+
+        if self.partial_image:
+            # Simulated partial/occluded view for the STN module (STNReID).
+            partial_pil = generate_partial_image(
+                original_img, self.partial_min, self.partial_max
+            )
+            ret["partial_images"] = self.partial_transform(partial_pil)
 
         return ret
 
