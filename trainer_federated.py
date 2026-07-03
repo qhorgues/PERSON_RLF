@@ -61,6 +61,7 @@ def run(config: DictConfig) -> None:
     dm.setup()
 
     partitioner = build_partitioner(config, dm.dataset.train)
+    partitioner.print_distribution()
     logger.info(
         f"Federated partition (alpha={partitioner.alpha}, "
         f"num_clients={partitioner.num_clients}):\n{partitioner.summary()}"

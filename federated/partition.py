@@ -98,6 +98,94 @@ class IdentityPartitioner:
             )
         return table
 
+    @staticmethod
+    def _extract_location(img_path: str) -> str:
+        """Derive a canonical location label from an image path.
+
+        Handles two folder naming conventions found in VN3K:
+          - Named locations: "HoGuom_00", "HoGuom_01"  -> "HoGuom"
+          - Numbered persons: "Person10", "Person10.2"  -> "Person10"
+
+        Any trailing underscore+digit or dot+digit suffix is stripped so that
+        multiple cameras at the same site are grouped under a single label.
+        """
+        import re
+        folder = img_path.rstrip("/").split("/")[-2]
+        # Strip trailing camera index: "_00", "_01", ".2", etc.
+        location = re.sub(r"[_.]\d+$", "", folder)
+        return location
+
+    def distribution_matrix(self) -> PrettyTable:
+        """Location x client matrix: sample counts per canonical location per client.
+
+        Returns:
+            PrettyTable where:
+              - the first column is the canonical location label,
+              - each subsequent column corresponds to a client ("client_<id>"),
+              - the last column is the row total,
+              - the last row ("TOTAL") gives the per-client sample count.
+        """
+        # Pre-compute per-client sample counts broken down by location.
+        # client_loc_counts[cid][location] = number of samples
+        client_loc_counts: Dict[int, Dict[str, int]] = {
+            cid: defaultdict(int) for cid in range(self.num_clients)
+        }
+        all_locations: set = set()
+        for cid, indices in self._client_indices.items():
+            for idx in indices:
+                loc = self._extract_location(self.train_samples[idx][2])
+                client_loc_counts[cid][loc] += 1
+                all_locations.add(loc)
+
+        displayed_locations = sorted(all_locations)
+
+        # Build header: one column per client + a TOTAL column
+        client_headers = [f"client_{cid}" for cid in range(self.num_clients)]
+        headers = ["location"] + client_headers + ["TOTAL"]
+        table = PrettyTable(headers)
+        table.align = "r"
+        table.align["location"] = "l"
+
+        # One row per location
+        totals_per_client: Dict[int, int] = defaultdict(int)
+        for loc in displayed_locations:
+            row = [loc]
+            loc_total = 0
+            for cid in range(self.num_clients):
+                n = client_loc_counts[cid].get(loc, 0)
+                row.append(n)
+                totals_per_client[cid] += n
+                loc_total += n
+            row.append(loc_total)
+            table.add_row(row)
+
+        # Footer row: per-client totals across all locations
+        total_row = ["TOTAL"]
+        grand_total = 0
+        for cid in range(self.num_clients):
+            t = totals_per_client[cid]
+            total_row.append(t)
+            grand_total += t
+        total_row.append(grand_total)
+        table.add_row(total_row)
+
+        return table
+
+    def print_distribution(self) -> None:
+        """Print the summary table followed by the location x client distribution matrix."""
+        num_pids = len(self._pid_to_indices)
+        print(
+            f"\n=== Federated Partition  |  "
+            f"clients={self.num_clients}  alpha={self.alpha}  "
+            f"total_pids={num_pids}  seed={self.seed} ===\n"
+        )
+
+        print("── Summary ──────────────────────────────────────────────────────")
+        print(self.summary())
+
+        print("\n── Distribution matrix (samples per location per client) ────────")
+        print(self.distribution_matrix())
+
     def save_partition(self, path: str) -> None:
         with open(path, "wb") as f:
             pickle.dump(

@@ -143,7 +143,7 @@ def run(config: DictConfig) -> None:
         # Log figure to wandb
         wandb_visualized_data = prepare_prediction_for_wandb_table(
             wrong_predictions=model.test_final_outputs,
-            tokenizer=tokenizer,
+            tokenizer=tokenizer,jv
             MEAN=torch.tensor(config.aug.img.mean),
             STD=torch.tensor(config.aug.img.std),
         )
