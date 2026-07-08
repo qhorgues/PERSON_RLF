@@ -4,7 +4,7 @@ from typing import List, Optional, Tuple
 
 import pytorch_lightning as pl
 from lightning.pytorch.utilities import CombinedLoader
-from loguru import logger
+from utils.logger import log as logger
 from torch.utils.data import DataLoader
 
 from data.augmentation.transform import build_image_aug_pool, build_text_aug_pool

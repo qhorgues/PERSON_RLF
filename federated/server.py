@@ -7,7 +7,7 @@ from typing import Dict, Tuple
 import torch
 from flwr.common import Context, NDArrays, Scalar, ndarrays_to_parameters
 from flwr.server import ServerApp, ServerAppComponents, ServerConfig
-from loguru import logger
+from utils.logger import log as logger
 from prettytable import PrettyTable
 
 from federated.aggregation import build_strategy
@@ -53,10 +53,9 @@ def evaluate_global(model: LitTBPS, test_loader, device: torch.device) -> Dict[s
 
 
 class FederatedServer:
-    def __init__(self, config, reference_datamodule, training_logger=None):
+    def __init__(self, config, reference_datamodule):
         self.config = config
         self.datamodule = reference_datamodule
-        self.training_logger = training_logger
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.global_model = self._build_global_model()
         self.selector = self.build_selector()
@@ -100,13 +99,15 @@ class FederatedServer:
             )
             logger.info(f"[Global t2i eval]\n{table}")
 
+            loss = 100.0 - results["R1"]
+
             metrics: Dict[str, Scalar] = {f"global_{k}": v for k, v in results.items()}
             metrics["num_shared_parameters"] = num_shared
+            metrics["global_loss"] = loss
 
-            if self.training_logger is not None:
-                self.training_logger.log_metrics(metrics, step=server_round)
+            # fan-out vers la façade (csv / wandb / plot / console selon la config)
+            logger.log_metrics(metrics, step=server_round)
 
-            loss = 100.0 - results["R1"]
             return loss, metrics
 
         return evaluate

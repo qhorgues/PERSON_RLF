@@ -13,7 +13,7 @@ import lightning as L
 import torch
 from flwr.client import ClientApp, NumPyClient
 from flwr.common import Context, NDArrays, Scalar
-from loguru import logger
+from utils.logger import log as logger
 from omegaconf import OmegaConf
 
 from federated.fedprox import attach_fedprox_hook
@@ -165,6 +165,9 @@ class TBPSFlowerClient(NumPyClient):
             for k, v in trainer.callback_metrics.items()
             if v.numel() == 1
         }
+        # client_id lets the server-side strategy fan-out these metrics to a
+        # per-client output (utils.logger `output=`); see aggregation.py.
+        metrics["client_id"] = self.client_id
         return self.get_parameters({}), self.num_examples, metrics
 
     def evaluate(self, parameters: NDArrays, config: Dict[str, Scalar]) -> Tuple[float, int, Dict[str, Scalar]]:
@@ -176,6 +179,7 @@ class TBPSFlowerClient(NumPyClient):
         metrics = {k: float(v) for k, v in (results[0] if results else {}).items()}
 
         loss = 100.0 - metrics.get("val_score", 0.0)
+        metrics["client_id"] = self.client_id  # -> per-client output, server-side
         return loss, self.num_examples, metrics
 
 

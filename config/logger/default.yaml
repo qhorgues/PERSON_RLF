@@ -3,23 +3,56 @@ experiment_name: null # Will be dynamically set in the Python script
 
 # Checkpoint settings
 checkpoint:
-  monitor: "val_score"
-  mode: "max"
-  save_top_k: 3
-  save_last: true
-  filename: "{epoch}-{val_score:.2f}"
+    monitor: "val_score"
+    mode: "max"
+    save_top_k: 3
+    save_last: true
+    filename: "{epoch}-{val_score:.2f}"
 
-# # TensorBoard specific settings
-# tensorboard: {}
-  # flush_secs: 120
-  # max_queue: 10
-logger_type: "wandb"
-logger_addtional_args:
-  group: null
+sinks:
+    console:
+        enabled: true
+        level: INFO
+        options: {} # free-form per-sink options (forwarded as-is to the sink)
+    file:
+        enabled: true
+        level: DEBUG
+        filename: train.log
+        max_mb: 10
+        backups: 5
+        options: {}
+    csv:
+        enabled: true
+        filename: metrics.csv
+        options: {}
+    wandb:
+        enabled: false
+        project: PERSON_SEARCH # project-level name (library default is null -> $WANDB_PROJECT)
+        entity: null
+        group: null
+        mode: online
+        watch: all
+        options: {}
+    tensorboard:
+        enabled: false
+        options: {}
+    plot:
+        enabled: false
+        every_n: 1
+        filename: fl_results.png
+        # Project-specific panels/key-map/shading live in fl_plot_spec.py, loaded
+        # via `spec`. pyplot is tunable here (dpi/figsize/style/rcParams/backend).
+        options:
+            spec: fl_plot_spec
+            title: "Federated TBPS-SigLIP — live"
+            backend: Agg
+            dpi: 150
+            figsize: [16, 9]
+            # style: seaborn-v0_8
+            # rcParams: { font.size: 11 }
 
-# Logging settings
-console:
-  level: "INFO"
-file:
-  level: "DEBUG"
-  filename: "train.log"
+third_party:
+    default: INFO
+    flwr: WARNING
+    ray: WARNING
+    transformers: WARNING

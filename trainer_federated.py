@@ -14,7 +14,7 @@ import os
 import hydra
 from flwr.simulation import run_simulation
 from lightning.pytorch import seed_everything
-from loguru import logger
+from utils.logger import log as logger
 from omegaconf import DictConfig, OmegaConf
 
 from federated.client import make_client_app
@@ -31,6 +31,35 @@ def resolve_tuple(*args):
 
 OmegaConf.register_new_resolver("tuple", resolve_tuple, replace=True)
 OmegaConf.register_new_resolver("eval", eval, replace=True)
+
+
+def _reconcile_client_count(config: DictConfig, partitioner) -> None:
+    """Align the config client-count knobs with the partitioner's effective client count.
+
+    Location partitioning derives the number of clients from the data (one or more clients
+    per physical location), so `num_clients` — consumed by `run_simulation(num_supernodes=)`,
+    the strategy `min_*_clients` and each client's `TBPSDataModule` — must be updated to match,
+    otherwise Flower would deadlock waiting for `min_available_clients`. Also fixes the case
+    where `num_clients` is lowered but the hard-coded `min_available_clients` is left stale.
+    """
+    federated_cfg = config.federated
+    effective = int(partitioner.num_clients)
+    if (
+        effective == federated_cfg.num_clients
+        and effective >= federated_cfg.min_available_clients
+    ):
+        return
+
+    logger.info(
+        f"Reconciling client count: config num_clients={federated_cfg.num_clients} "
+        f"-> effective={effective} (min_available/min_fit/min_evaluate clamped)."
+    )
+    federated_cfg.num_clients = effective
+    federated_cfg.min_available_clients = effective
+    federated_cfg.min_fit_clients = min(federated_cfg.min_fit_clients, effective)
+    federated_cfg.min_evaluate_clients = min(
+        federated_cfg.get("min_evaluate_clients", federated_cfg.min_fit_clients), effective
+    )
 
 
 @hydra.main(version_base="1.3", config_path="config")
@@ -53,6 +82,10 @@ def run(config: DictConfig) -> None:
     )
     config.federated.state_dir = os.path.abspath(config.federated.state_dir)
 
+    # Build the unified façade early (console/file/csv/wandb/plot + interception) so
+    # the config dump, the partition text AND the partition metrics reach the sinks.
+    setup_logging(config)
+
     logger.info(f"Federated config:\n{OmegaConf.to_yaml(config.federated)}")
 
     # Reference data module: full training set, used for partitioning, the
@@ -61,9 +94,11 @@ def run(config: DictConfig) -> None:
     dm.setup()
 
     partitioner = build_partitioner(config, dm.dataset.train)
+    _reconcile_client_count(config, partitioner)
     partitioner.print_distribution()
+    partitioner.log_partition_metrics()  # per-client partition stats -> partition.csv
     logger.info(
-        f"Federated partition (alpha={partitioner.alpha}, "
+        f"Federated partition ({config.federated.partition.type}, "
         f"num_clients={partitioner.num_clients}):\n{partitioner.summary()}"
     )
     partitioner.save_partition("federated_partition.pkl")
@@ -71,9 +106,7 @@ def run(config: DictConfig) -> None:
     state_store = ClientStateStore(config.federated.state_dir)
     state_store.clear()
 
-    training_logger, _ = setup_logging(config)
-
-    server = FederatedServer(config, dm, training_logger=training_logger)
+    server = FederatedServer(config, dm)
     server_app = server.make_server_app()
     client_app = make_client_app(config, partitioner, server.selector, state_store)
 
@@ -95,7 +128,7 @@ def run(config: DictConfig) -> None:
 
 def _log_round_history(config: DictConfig, server: FederatedServer) -> None:
     """Final summary: convergence/comm-cost are logged per round in `evaluate_fn`;
-    this just closes out the run (and the W&B run, if any)."""
+    this just closes out the run (and all sinks: file, W&B, plot, ...)."""
     logger.info(
         f"Federated run finished: {config.federated.num_rounds} rounds, "
         f"{config.federated.num_clients} clients, algorithm={config.federated.algorithm}, "
@@ -103,11 +136,8 @@ def _log_round_history(config: DictConfig, server: FederatedServer) -> None:
         f"({server.selector.num_shared_parameters():,} shared parameters/round)."
     )
 
-    if config.logger.logger_type == "wandb":
-        import wandb
-
-        if wandb.run:
-            wandb.finish()
+    # ferme tous les sinks (fichier, run W&B, plot, ...)
+    logger.close()
 
 
 if __name__ == "__main__":

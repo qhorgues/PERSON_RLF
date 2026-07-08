@@ -12,6 +12,8 @@ import os.path as osp
 import yaml
 from easydict import EasyDict as edict
 
+from utils.logger import log as logger
+
 ImageFile.LOAD_TRUNCATED_IMAGES = True
 
 
@@ -26,7 +28,9 @@ def read_image(img_path):
             img = Image.open(img_path).convert('RGB')
             got_img = True
         except IOError:
-            print("IOError incurred when reading '{}'. Will redo. Don't worry. Just chill.".format(img_path))
+            logger.warning(
+                "IOError incurred when reading '{}'. Will redo. Don't worry. Just chill.".format(img_path)
+            )
             pass
     return img
 
@@ -43,7 +47,7 @@ def mkdir_if_missing(directory):
 def check_isfile(path):
     isfile = osp.isfile(path)
     if not isfile:
-        print("=> Warning: no file found at '{}' (ignored)".format(path))
+        logger.warning("no file found at '{}' (ignored)".format(path))
     return isfile
 
 

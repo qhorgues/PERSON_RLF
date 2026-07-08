@@ -1,6 +1,6 @@
 from typing import Any, Dict, List
 
-from loguru import logger
+from utils.logger import log as logger
 
 from utils.parse_module_str import parse_module_str
 

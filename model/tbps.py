@@ -2,7 +2,7 @@ from collections import OrderedDict
 
 import torch
 import torch.nn as nn
-from loguru import logger
+from utils.logger import log as logger
 
 from model import objectives
 from model.layers import LayerNorm, QuickGELU, Transformer

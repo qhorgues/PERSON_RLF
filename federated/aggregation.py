@@ -7,10 +7,10 @@ aggregation (weighted by num_examples, FedSH eq. 21) applies unchanged.
 required for Phase 1.
 """
 
-from typing import Callable, Dict, List, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 import numpy as np
-from loguru import logger
+from utils.logger import log as logger
 from flwr.common import Metrics, NDArrays, Scalar
 from flwr.server.strategy import FedAvg, FedProx, Strategy
 
@@ -26,6 +26,10 @@ def weighted_average(results: List[Tuple[NDArrays, int]]) -> NDArrays:
     ]
 
 
+# Routing key injected by the client (federated/client.py); not a real metric.
+_CLIENT_ID_KEY = "client_id"
+
+
 def _weighted_metrics_average(
     metrics: List[Tuple[int, Metrics]],
 ) -> Dict[str, Scalar]:
@@ -36,6 +40,7 @@ def _weighted_metrics_average(
     keys = set()
     for _, client_metrics in metrics:
         keys.update(client_metrics.keys())
+    keys.discard(_CLIENT_ID_KEY)  # routing tag, not averaged
 
     return {
         key: sum(
@@ -75,6 +80,42 @@ def make_fit_config_fn(config) -> Callable[[int], Dict[str, Scalar]]:
     return on_fit_config_fn
 
 
+class _PerClientMetricsLog:
+    """Mixin: fan-out each client's returned metrics to a per-client `output`.
+
+    Runs server-side (main process, façade configured with the run's sinks), so it
+    sidesteps the fact that Ray simulation workers have an unconfigured façade.
+    `aggregate_fit`/`aggregate_evaluate` are the only strategy hooks that receive
+    `server_round`, hence the override (vs. the `*_metrics_aggregation_fn`).
+    """
+
+    def _log_per_client(self, server_round: int, results: list) -> None:
+        for _client_proxy, res in results:
+            metrics = getattr(res, "metrics", None) or {}
+            cid = metrics.get(_CLIENT_ID_KEY)
+            if cid is None:
+                continue
+            payload = {k: v for k, v in metrics.items() if k != _CLIENT_ID_KEY}
+            if payload:
+                logger.log_metrics(payload, step=server_round, output=f"client_{int(cid)}")
+
+    def aggregate_fit(self, server_round, results, failures):
+        self._log_per_client(server_round, results)
+        return super().aggregate_fit(server_round, results, failures)
+
+    def aggregate_evaluate(self, server_round, results, failures):
+        self._log_per_client(server_round, results)
+        return super().aggregate_evaluate(server_round, results, failures)
+
+
+class FedAvgSubspace(_PerClientMetricsLog, FedAvg):
+    """FedAvg over the shared subspace + per-client metric fan-out."""
+
+
+class FedProxSubspace(_PerClientMetricsLog, FedProx):
+    """FedProx over the shared subspace + per-client metric fan-out."""
+
+
 def build_strategy(config, initial_parameters, evaluate_fn) -> Strategy:
     """Build the FedAvg (Phase 1) or FedProx (Phase 2) strategy."""
     federated_cfg = config.federated
@@ -94,10 +135,10 @@ def build_strategy(config, initial_parameters, evaluate_fn) -> Strategy:
 
     if federated_cfg.algorithm == "fedprox":
         logger.info(f"Using FedProx strategy (proximal_mu={federated_cfg.proximal_mu})")
-        return FedProx(proximal_mu=float(federated_cfg.proximal_mu), **common_kwargs)
+        return FedProxSubspace(proximal_mu=float(federated_cfg.proximal_mu), **common_kwargs)
 
     if federated_cfg.algorithm != "fedavg":
         raise ValueError(f"Unknown federated algorithm: {federated_cfg.algorithm}")
 
     logger.info("Using FedAvg strategy")
-    return FedAvg(**common_kwargs)
+    return FedAvgSubspace(**common_kwargs)

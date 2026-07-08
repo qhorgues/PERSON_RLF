@@ -1,7 +1,7 @@
 import torch
 import torch.nn.functional as F
 from prettytable import PrettyTable
-from loguru import logger
+from utils.logger import log as logger
 
 
 def rank(similarity, q_pids, g_pids, max_rank=10, get_mAP=True):

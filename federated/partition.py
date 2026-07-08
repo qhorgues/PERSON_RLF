@@ -1,22 +1,118 @@
-"""Non-IID identity-based partitioning of the TBPS training set across FL clients.
+"""Partitioning of the TBPS training set across FL clients.
 
-Implements the Dirichlet(alpha) partitioning scheme: identities (pids) - not raw
-samples - are split across clients. For each identity, a per-client proportion
-vector is drawn from Dirichlet(alpha); a small alpha concentrates the mass on a
-few clients (strong non-IID, little ID overlap), a large alpha spreads samples
-almost evenly (close to IID).
+Two schemes are provided:
+
+- `IdentityPartitioner` (``type: identity_dirichlet``) — synthetic non-IID: identities
+  (pids), not raw samples, are split across clients via a per-identity Dirichlet(alpha)
+  proportion vector. Small alpha => strong non-IID (little ID overlap); large alpha =>
+  close to IID. Every client still draws from the *same* physical sources.
+
+- `LocationPartitioner` (``type: location``) — realistic "per-source" federation: each
+  client is *anchored* to a physical image source (a site / camera location, recovered
+  from ``img_path``). Large locations are split across several disjoint clients so a
+  dominant site does not sit in one client; a shared ``other`` filler pool (messy folders
+  + tiny sites) is distributed to top up the smallest clients so sizes stay homogeneous.
 """
 
+import heapq
 import pickle
+import re
 from collections import defaultdict
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
-from loguru import logger
+from utils.logger import log as logger
 from prettytable import PrettyTable
 
 
-class IdentityPartitioner:
+def extract_location(img_path: str) -> str:
+    """Derive a canonical location label from an image path.
+
+    Handles the folder naming conventions found in VN3K:
+      - Named sites (image directly under the site folder):
+        ``"HoGuom_00/xxx.jpg"``, ``"HoGuom_01/xxx.jpg"`` -> ``"HoGuom"``
+        (trailing camera suffix ``_NN`` / ``.N`` is stripped so several cameras of one
+        site collapse to a single label).
+      - Per-identity folders (``TEST_DATA``/``TRAINNING_DATA`` layout), whose immediate
+        parent is ``PersonN`` / ``PersonN.2`` and is *not* a physical location ->
+        ``"other"`` (a catch-all bucket used as filler by `LocationPartitioner`).
+    """
+    parent = img_path.rstrip("/").split("/")[-2]
+    if re.fullmatch(r"(?i)person\d+(\.\d+)?", parent):
+        return "other"
+    return re.sub(r"[_.]\d+$", "", parent)
+
+
+class _IndexPartitioner:
+    """Shared machinery for index-based FL partitioners.
+
+    Subclasses must populate `self.train_samples`, `self.num_clients` and
+    `self._client_indices` (client_id -> list of sample indices into `train_samples`).
+    """
+
+    train_samples: List[Tuple]
+    num_clients: int
+    _client_indices: Dict[int, List[int]]
+
+    def partition(self) -> List[List[Tuple]]:
+        """Return, for each client, its list of (pid, image_id, img_path, caption)."""
+        return [self.client_samples(cid) for cid in range(self.num_clients)]
+
+    def client_samples(self, client_id: int) -> List[Tuple]:
+        return [self.train_samples[idx] for idx in self._client_indices[client_id]]
+
+    def client_num_examples(self, client_id: int) -> int:
+        return len(self._client_indices[client_id])
+
+    def distribution_matrix(self) -> PrettyTable:
+        """Location x client matrix: sample counts per canonical location per client.
+
+        Rows are canonical locations (via `extract_location`), columns are clients plus a
+        row/column total; the last row ("TOTAL") gives the per-client sample count.
+        """
+        client_loc_counts: Dict[int, Dict[str, int]] = {
+            cid: defaultdict(int) for cid in range(self.num_clients)
+        }
+        all_locations: set = set()
+        for cid, indices in self._client_indices.items():
+            for idx in indices:
+                loc = extract_location(self.train_samples[idx][2])
+                client_loc_counts[cid][loc] += 1
+                all_locations.add(loc)
+
+        displayed_locations = sorted(all_locations)
+
+        client_headers = [f"client_{cid}" for cid in range(self.num_clients)]
+        headers = ["location"] + client_headers + ["TOTAL"]
+        table = PrettyTable(headers)
+        table.align = "r"
+        table.align["location"] = "l"
+
+        totals_per_client: Dict[int, int] = defaultdict(int)
+        for loc in displayed_locations:
+            row = [loc]
+            loc_total = 0
+            for cid in range(self.num_clients):
+                n = client_loc_counts[cid].get(loc, 0)
+                row.append(n)
+                totals_per_client[cid] += n
+                loc_total += n
+            row.append(loc_total)
+            table.add_row(row)
+
+        total_row = ["TOTAL"]
+        grand_total = 0
+        for cid in range(self.num_clients):
+            t = totals_per_client[cid]
+            total_row.append(t)
+            grand_total += t
+        total_row.append(grand_total)
+        table.add_row(total_row)
+
+        return table
+
+
+class IdentityPartitioner(_IndexPartitioner):
     def __init__(
         self,
         train_samples: List[Tuple],
@@ -68,16 +164,6 @@ class IdentityPartitioner:
 
         return client_indices
 
-    def partition(self) -> List[List[Tuple]]:
-        """Return, for each client, its list of (pid, image_id, img_path, caption)."""
-        return [self.client_samples(cid) for cid in range(self.num_clients)]
-
-    def client_samples(self, client_id: int) -> List[Tuple]:
-        return [self.train_samples[idx] for idx in self._client_indices[client_id]]
-
-    def client_num_examples(self, client_id: int) -> int:
-        return len(self._client_indices[client_id])
-
     def summary(self) -> PrettyTable:
         """Diagnostic table: number of IDs / samples and ID overlap across clients."""
         client_pids = {
@@ -98,93 +184,40 @@ class IdentityPartitioner:
             )
         return table
 
-    @staticmethod
-    def _extract_location(img_path: str) -> str:
-        """Derive a canonical location label from an image path.
-
-        Handles two folder naming conventions found in VN3K:
-          - Named locations: "HoGuom_00", "HoGuom_01"  -> "HoGuom"
-          - Numbered persons: "Person10", "Person10.2"  -> "Person10"
-
-        Any trailing underscore+digit or dot+digit suffix is stripped so that
-        multiple cameras at the same site are grouped under a single label.
-        """
-        import re
-        folder = img_path.rstrip("/").split("/")[-2]
-        # Strip trailing camera index: "_00", "_01", ".2", etc.
-        location = re.sub(r"[_.]\d+$", "", folder)
-        return location
-
-    def distribution_matrix(self) -> PrettyTable:
-        """Location x client matrix: sample counts per canonical location per client.
-
-        Returns:
-            PrettyTable where:
-              - the first column is the canonical location label,
-              - each subsequent column corresponds to a client ("client_<id>"),
-              - the last column is the row total,
-              - the last row ("TOTAL") gives the per-client sample count.
-        """
-        # Pre-compute per-client sample counts broken down by location.
-        # client_loc_counts[cid][location] = number of samples
-        client_loc_counts: Dict[int, Dict[str, int]] = {
-            cid: defaultdict(int) for cid in range(self.num_clients)
-        }
-        all_locations: set = set()
-        for cid, indices in self._client_indices.items():
-            for idx in indices:
-                loc = self._extract_location(self.train_samples[idx][2])
-                client_loc_counts[cid][loc] += 1
-                all_locations.add(loc)
-
-        displayed_locations = sorted(all_locations)
-
-        # Build header: one column per client + a TOTAL column
-        client_headers = [f"client_{cid}" for cid in range(self.num_clients)]
-        headers = ["location"] + client_headers + ["TOTAL"]
-        table = PrettyTable(headers)
-        table.align = "r"
-        table.align["location"] = "l"
-
-        # One row per location
-        totals_per_client: Dict[int, int] = defaultdict(int)
-        for loc in displayed_locations:
-            row = [loc]
-            loc_total = 0
-            for cid in range(self.num_clients):
-                n = client_loc_counts[cid].get(loc, 0)
-                row.append(n)
-                totals_per_client[cid] += n
-                loc_total += n
-            row.append(loc_total)
-            table.add_row(row)
-
-        # Footer row: per-client totals across all locations
-        total_row = ["TOTAL"]
-        grand_total = 0
-        for cid in range(self.num_clients):
-            t = totals_per_client[cid]
-            total_row.append(t)
-            grand_total += t
-        total_row.append(grand_total)
-        table.add_row(total_row)
-
-        return table
-
     def print_distribution(self) -> None:
         """Print the summary table followed by the location x client distribution matrix."""
         num_pids = len(self._pid_to_indices)
-        print(
+        logger.info(
             f"\n=== Federated Partition  |  "
             f"clients={self.num_clients}  alpha={self.alpha}  "
             f"total_pids={num_pids}  seed={self.seed} ===\n"
+            "── Summary ──────────────────────────────────────────────────────\n"
+            f"{self.summary()}\n"
+            "── Distribution matrix (samples per location per client) ────────\n"
+            f"{self.distribution_matrix()}"
         )
 
-        print("── Summary ──────────────────────────────────────────────────────")
-        print(self.summary())
-
-        print("\n── Distribution matrix (samples per location per client) ────────")
-        print(self.distribution_matrix())
+    def log_partition_metrics(self, output: str = "partition") -> None:
+        """Emit per-client partition stats to a dedicated metrics output (-> `<output>.csv`)."""
+        client_pids = {
+            cid: {self.train_samples[idx][0] for idx in indices}
+            for cid, indices in self._client_indices.items()
+        }
+        for cid in range(self.num_clients):
+            pids = client_pids[cid]
+            other_pids = set().union(
+                *(p for other_cid, p in client_pids.items() if other_cid != cid)
+            ) if self.num_clients > 1 else set()
+            shared_pct = 100.0 * len(pids & other_pids) / len(pids) if pids else 0.0
+            logger.log_metrics(
+                {
+                    "num_ids": len(pids),
+                    "num_samples": len(self._client_indices[cid]),
+                    "shared_ids_pct": shared_pct,
+                },
+                step=cid,
+                output=output,
+            )
 
     def save_partition(self, path: str) -> None:
         with open(path, "wb") as f:
@@ -209,6 +242,220 @@ class IdentityPartitioner:
         logger.info(f"Loaded federated partition from {path}")
 
 
+class LocationPartitioner(_IndexPartitioner):
+    """Per-source partitioning: clients anchored to a physical location, homogenized.
+
+    `num_clients` (config) is a *target granularity*: it sets the ideal client size
+    ``per_client_target = len(train_samples) / num_clients``. Each named location gets
+    ``max(1, round(len(loc) / per_client_target))`` disjoint, identity-coherent, size-
+    balanced clients (so a dominant site does not sit in one client). The ``other`` pool
+    (per-identity folders + sites below `min_samples`) is then distributed to the smallest
+    clients as filler, so client sizes converge. The effective client count is derived and
+    exposed as `self.num_clients`.
+    """
+
+    def __init__(
+        self,
+        train_samples: List[Tuple],
+        num_clients: int,
+        min_samples: int = 0,
+        seed: Optional[int] = None,
+    ):
+        """
+        Args:
+            train_samples: dataset.train, i.e. a list of (pid, image_id, img_path, caption).
+            num_clients: *target* number of clients (granularity); the effective count is
+                derived from the data and stored in `self.num_clients`.
+            min_samples: named locations with fewer than this many samples are demoted into
+                the `other` filler pool instead of getting their own client. 0 keeps all.
+            seed: RNG seed for reproducibility.
+        """
+        self.train_samples = train_samples
+        self.target_num_clients = max(1, num_clients)
+        self.min_samples = min_samples
+        self.seed = seed
+        self._rng = np.random.default_rng(seed)
+
+        (
+            self._client_indices,
+            self._client_location,
+            self._client_filler,
+        ) = self._allocate()
+        self.num_clients = len(self._client_indices)
+
+    def _allocate(self) -> Tuple[Dict[int, List[int]], Dict[int, str], Dict[int, int]]:
+        # 1. group sample indices by physical location
+        loc_to_indices: Dict[str, List[int]] = defaultdict(list)
+        for idx, sample in enumerate(self.train_samples):
+            loc_to_indices[extract_location(sample[2])].append(idx)
+
+        # 2. peel off the 'other' filler pool; demote tiny named sites into it
+        other_pool: List[int] = list(loc_to_indices.pop("other", []))
+        named: Dict[str, List[int]] = {}
+        for loc, indices in loc_to_indices.items():
+            if len(indices) < self.min_samples:
+                other_pool.extend(indices)
+            else:
+                named[loc] = indices
+
+        per_client_target = len(self.train_samples) / self.target_num_clients
+
+        # 3. anchor clients to named locations, splitting large ones
+        client_indices: Dict[int, List[int]] = {}
+        client_location: Dict[int, str] = {}
+        cid = 0
+        for loc in sorted(named.keys()):
+            indices = named[loc]
+            k = max(1, round(len(indices) / per_client_target)) if per_client_target else 1
+            for shard in self._balanced_pid_shards(indices, k):
+                client_indices[cid] = list(shard)
+                client_location[cid] = loc
+                cid += 1
+
+        # Edge case: no named locations (everything is 'other') -> split the pool directly
+        if not client_indices:
+            k = max(1, min(self.target_num_clients, len(other_pool) or 1))
+            for shard in self._even_shards(other_pool, k):
+                client_indices[cid] = list(shard)
+                client_location[cid] = "other"
+                cid += 1
+            other_pool = []
+
+        # 4. homogenize: hand the 'other' filler to the smallest clients first
+        client_filler = {c: 0 for c in client_indices}
+        self._distribute_filler(client_indices, client_filler, other_pool)
+
+        return client_indices, client_location, client_filler
+
+    def _balanced_pid_shards(self, indices: List[int], k: int) -> List[List[int]]:
+        """Split `indices` into up to `k` disjoint, identity-coherent, size-balanced shards.
+
+        Identities are never split across shards (a pid's samples stay together), and `k`
+        is clamped to the number of distinct pids so no shard is left empty.
+        """
+        pid_groups: Dict[int, List[int]] = defaultdict(list)
+        for idx in indices:
+            pid_groups[self.train_samples[idx][0]].append(idx)
+
+        groups = list(pid_groups.values())
+        self._rng.shuffle(groups)  # reproducible tie-breaking
+        k = max(1, min(k, len(groups)))
+        if k == 1:
+            return [list(indices)]
+
+        groups.sort(key=len, reverse=True)
+        bins: List[List[int]] = [[] for _ in range(k)]
+        sizes = [0] * k
+        for group in groups:
+            j = int(np.argmin(sizes))
+            bins[j].extend(group)
+            sizes[j] += len(group)
+        return bins
+
+    def _even_shards(self, indices: List[int], k: int) -> List[List[int]]:
+        indices = list(indices)
+        self._rng.shuffle(indices)
+        return [list(shard) for shard in np.array_split(indices, k)]
+
+    def _distribute_filler(
+        self,
+        client_indices: Dict[int, List[int]],
+        client_filler: Dict[int, int],
+        filler_pool: List[int],
+    ) -> None:
+        """Greedily assign filler samples to the currently-smallest client (disjoint)."""
+        if not filler_pool:
+            return
+        filler = list(filler_pool)
+        self._rng.shuffle(filler)
+        heap = [(len(idxs), cid) for cid, idxs in client_indices.items()]
+        heapq.heapify(heap)
+        for idx in filler:
+            size, cid = heapq.heappop(heap)
+            client_indices[cid].append(idx)
+            client_filler[cid] += 1
+            heapq.heappush(heap, (size + 1, cid))
+
+    def summary(self) -> PrettyTable:
+        """Per-client diagnostic: anchor location, #ids, location vs filler sample counts."""
+        table = PrettyTable(
+            ["client_id", "location", "num_ids", "num_location", "num_filler", "num_samples"]
+        )
+        table.align["location"] = "l"
+        for cid in range(self.num_clients):
+            indices = self._client_indices[cid]
+            pids = {self.train_samples[idx][0] for idx in indices}
+            filler = self._client_filler.get(cid, 0)
+            table.add_row(
+                [
+                    cid,
+                    self._client_location.get(cid, "?"),
+                    len(pids),
+                    len(indices) - filler,
+                    filler,
+                    len(indices),
+                ]
+            )
+        return table
+
+    def print_distribution(self) -> None:
+        num_locations = len(set(self._client_location.values()))
+        logger.info(
+            f"\n=== Federated Location Partition  |  "
+            f"clients={self.num_clients}  target={self.target_num_clients}  "
+            f"locations={num_locations}  min_samples={self.min_samples}  seed={self.seed} ===\n"
+            "── Summary ──────────────────────────────────────────────────────\n"
+            f"{self.summary()}\n"
+            "── Distribution matrix (samples per location per client) ────────\n"
+            f"{self.distribution_matrix()}"
+        )
+
+    def log_partition_metrics(self, output: str = "partition") -> None:
+        """Emit per-client partition stats to a dedicated metrics output (-> `<output>.csv`)."""
+        for cid in range(self.num_clients):
+            indices = self._client_indices[cid]
+            pids = {self.train_samples[idx][0] for idx in indices}
+            filler = self._client_filler.get(cid, 0)
+            logger.log_metrics(
+                {
+                    "num_ids": len(pids),
+                    "num_location": len(indices) - filler,
+                    "num_filler": filler,
+                    "num_samples": len(indices),
+                },
+                step=cid,
+                output=output,
+            )
+
+    def save_partition(self, path: str) -> None:
+        with open(path, "wb") as f:
+            pickle.dump(
+                {
+                    "client_indices": self._client_indices,
+                    "client_location": self._client_location,
+                    "client_filler": self._client_filler,
+                    "num_clients": self.num_clients,
+                    "target_num_clients": self.target_num_clients,
+                    "min_samples": self.min_samples,
+                    "seed": self.seed,
+                },
+                f,
+            )
+        logger.info(f"Saved federated location partition to {path}")
+
+    def load_partition(self, path: str) -> None:
+        with open(path, "rb") as f:
+            state = pickle.load(f)
+        self._client_indices = state["client_indices"]
+        self._client_location = state["client_location"]
+        self._client_filler = state["client_filler"]
+        self.num_clients = state["num_clients"]
+        self.target_num_clients = state["target_num_clients"]
+        self.min_samples = state["min_samples"]
+        self.seed = state["seed"]
+        logger.info(f"Loaded federated location partition from {path}")
+
+
 class PerDatasetPartitioner:
     """Stub for option (b): one dataset == one client (cross-institution heterogeneity).
 
@@ -221,11 +468,11 @@ class PerDatasetPartitioner:
         raise NotImplementedError(
             "PerDatasetPartitioner is documented (option b, cross-institution "
             "heterogeneity) but not implemented in Phase 1. Use "
-            "partition.type=identity_dirichlet."
+            "partition.type=identity_dirichlet or partition.type=location."
         )
 
 
-def build_partitioner(config, train_samples: List[Tuple]) -> IdentityPartitioner:
+def build_partitioner(config, train_samples: List[Tuple]) -> _IndexPartitioner:
     """Factory: build the configured partitioner from `config.federated.partition`."""
     partition_cfg = config.federated.partition
 
@@ -234,6 +481,13 @@ def build_partitioner(config, train_samples: List[Tuple]) -> IdentityPartitioner
             train_samples=train_samples,
             num_clients=config.federated.num_clients,
             alpha=partition_cfg.alpha,
+            seed=partition_cfg.get("seed", config.seed),
+        )
+    if partition_cfg.type == "location":
+        return LocationPartitioner(
+            train_samples=train_samples,
+            num_clients=config.federated.num_clients,
+            min_samples=partition_cfg.get("min_samples", 0),
             seed=partition_cfg.get("seed", config.seed),
         )
     if partition_cfg.type == "per_dataset":

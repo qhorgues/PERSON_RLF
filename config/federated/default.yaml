@@ -1,7 +1,7 @@
 # config/federated/default.yaml
 # Phase 1 (FedAvg, no STN) hyperparameters for trainer_federated.py
 
-num_clients: 8
+num_clients: 8 # identity_dirichlet: exact client count. location: target granularity (effective count is derived from the data and reconciled).
 num_rounds: 30
 local_epochs: 1
 fraction_fit: 1.0
@@ -17,8 +17,9 @@ subspace: text_tower+heads # full | text_tower | vision_tower | heads_only | tex
 custom_subspace_keys: null
 
 partition:
-  type: identity_dirichlet # identity_dirichlet | per_dataset (stub)
-  alpha: 0.5 # smaller -> stronger non-IID
+  type: identity_dirichlet # identity_dirichlet | location | per_dataset (stub)
+  alpha: 0.5 # (identity_dirichlet) smaller -> stronger non-IID
+  min_samples: 0 # (location) sites with fewer samples fold into the shared `other` filler pool; 0 keeps all
   seed: ${seed}
 
 stn: # Phase 2 - option (a). Model/data params live in the top-level `stn:` block;

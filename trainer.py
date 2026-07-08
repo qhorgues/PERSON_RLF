@@ -4,7 +4,7 @@ import hydra
 import lightning as L
 import torch
 import wandb
-from loguru import logger
+from utils.logger import log as logger
 from lightning.pytorch import seed_everything
 from lightning.pytorch.callbacks import LearningRateMonitor, EarlyStopping
 from omegaconf import OmegaConf, DictConfig
@@ -92,8 +92,8 @@ def run(config: DictConfig) -> None:
     )
     logger.info(f"Test loader length: {len(iter(test_loader))}")
 
-    if config.logger.logger_type == "wandb":
-        training_logger.watch(model, log="all")
+    # no-op si aucun sink W&B n'est actif (le bridge délègue à la façade)
+    training_logger.watch(model, log="all")
 
     trainer.validate(model, val_loader)
 
@@ -139,11 +139,11 @@ def run(config: DictConfig) -> None:
     # img_path = os.path.join(training_logger.save_dir, "test_visualization.png")
     # plt.savefig(img_path)
 
-    if config.logger.logger_type == "wandb":
+    if config.logger.sinks.wandb.enabled:
         # Log figure to wandb
         wandb_visualized_data = prepare_prediction_for_wandb_table(
             wrong_predictions=model.test_final_outputs,
-            tokenizer=tokenizer,jv
+            tokenizer=tokenizer,
             MEAN=torch.tensor(config.aug.img.mean),
             STD=torch.tensor(config.aug.img.std),
         )
@@ -169,8 +169,8 @@ def run(config: DictConfig) -> None:
     torch.cuda.empty_cache()
     gc.collect()
 
-    if wandb.run:
-        wandb.finish()
+    # ferme tous les sinks (fichier, run W&B, plot, ...)
+    logger.close()
 
 
 if __name__ == "__main__":

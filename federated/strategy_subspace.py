@@ -12,7 +12,7 @@ from typing import Callable, Dict, List, Optional
 
 import numpy as np
 import torch
-from loguru import logger
+from utils.logger import log as logger
 
 
 def _match_any(name: str, patterns: List[str]) -> bool:

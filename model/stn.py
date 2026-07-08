@@ -11,7 +11,7 @@ Integrated into ``model/tbps.py`` as ``self.stn_module`` (the ``stn*`` name is p
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from loguru import logger
+from utils.logger import log as logger
 
 
 class LocalizationNet(nn.Module):

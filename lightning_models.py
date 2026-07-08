@@ -6,7 +6,7 @@ import lightning as L
 import numpy as np
 import torch
 import torch.nn.functional as F
-from loguru import logger
+from utils.logger import log as logger
 from lightning.pytorch.utilities import grad_norm
 from prettytable import PrettyTable
 
