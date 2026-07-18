@@ -1,24 +1,30 @@
-"""Compare two federated-learning runs (offline) — one image per client + global + partition.
+"""Plot federated-learning runs (offline) — one image per client + global + partition.
+
+Accepts **any number of run directories** (1, 2, 3, …): a single directory plots that
+run on its own, several directories overlay them for comparison.
 
 Usage:
-    uv run plot_fl_compare.py <runA> <runB> [options]
-    uv run plot_fl_compare.py 2026-07-07/08-26-24 2026-07-06/11-04-32
-    uv run plot_fl_compare.py <runA> <runB> --metrics val_t2i_R1 total_loss
-    uv run plot_fl_compare.py <runA> <runB> --all --no-partition
+    uv run plot_fl_result.py <run>                       # single run
+    uv run plot_fl_result.py <runA> <runB> [<runC> ...]  # compare N runs
+    uv run plot_fl_result.py 2026-07-07/08-26-24 2026-07-06/11-04-32
+    uv run plot_fl_result.py <runA> <runB> --metrics val_t2i_R1 total_loss
+    uv run plot_fl_result.py <runA> <runB> --all --no-partition
 
 Chaque run est un dossier Hydra `outputs/<date>/<heure>/` contenant `client_*.csv`,
 `metrics.csv` et `partition.csv`. Le script produit, dans le dossier de sortie :
 
-  - client_<cid>.png : matrice de courbes des métriques du client (2 courbes = 2 runs) ;
-  - metrics.png      : matrice de courbes des métriques globales serveur (2 runs) ;
-  - partition.png    : barres horizontales empilées (répartition du dataset par client).
+  - client_<cid>.png : matrice de courbes des métriques du client (une courbe par run) ;
+  - metrics.png      : matrice de courbes des métriques globales serveur (une par run) ;
+  - partition.png    : barres horizontales groupées (répartition du dataset par client).
 
-Le rendu des matrices de courbes est mutualisé avec `plot_fl_results.py` et le RealtimePlotSink
-via `utils.logger.plot_panels` (aucune duplication de la logique de tracé). `read_csv` /
-`to_float` sont réutilisés de `plot_fl_results.py`.
+Le rendu des matrices de courbes est mutualisé avec le RealtimePlotSink via
+`utils.logger.plot_panels` (aucune duplication de la logique de tracé). Les couleurs par
+run suivent la palette catégorielle validée (color-by-series), doublée d'un cycle de
+marqueurs comme second canal d'identité.
 """
 
 import argparse
+import csv
 import glob
 import os
 import re
@@ -27,12 +33,22 @@ import matplotlib
 
 matplotlib.use("Agg")  # headless backend: we save PNGs
 
-from plot_fl_results import read_csv, to_float
 from utils.logger.plot_panels import render_figure
 
-# Fixed per-run styling so the two runs stay recognizable across every panel.
-COLOR_A, STYLE_A = "tab:blue", "o-"
-COLOR_B, STYLE_B = "tab:orange", "s-"
+# Per-run styling: validated categorical palette (light surface, CVD-safe order) +
+# a marker cycle so each run is distinguishable by hue *and* shape. Indexed by run
+# position, wrapping around for more runs than slots.
+RUN_COLORS = [
+    "#2a78d6", "#1baf7a", "#eda100", "#008300",
+    "#4a3aa7", "#e34948", "#e87ba4", "#eb6834",
+]
+RUN_MARKERS = ["o-", "s-", "^-", "D-", "v-", "P-", "X-", "*-"]
+
+
+def _run_style(i):
+    """(marker/line format, color) for run `i` (cycles past the palette length)."""
+    return RUN_MARKERS[i % len(RUN_MARKERS)], RUN_COLORS[i % len(RUN_COLORS)]
+
 
 # Curated, readable default set of per-client metrics (skipped if absent from a CSV).
 DEFAULT_CLIENT_METRICS = [
@@ -63,6 +79,29 @@ PRETTY = {
 
 def pretty(name):
     return PRETTY.get(name, name)
+
+
+# --------------------------------------------------------------------------- CSV I/O
+
+def read_csv(path):
+    """Read the CSV, skipping comment lines (#); return a dict of columns."""
+    with open(path, newline="") as f:
+        rows = [r for r in csv.reader(f) if r and not r[0].lstrip().startswith("#")]
+    header, data = rows[0], rows[1:]
+    cols = {name: [] for name in header}
+    for row in data:
+        for name, value in zip(header, row):
+            cols[name].append(value)
+    return cols
+
+
+def to_float(values):
+    """Convert to float, None if empty (e.g. stn_loss at round 0)."""
+    out = []
+    for v in values:
+        v = v.strip()
+        out.append(float(v) if v else None)
+    return out
 
 
 # --------------------------------------------------------------------------- I/O helpers
@@ -131,28 +170,29 @@ def _client_ids(run_dir):
 
 # --------------------------------------------------------------------------- curve figures
 
-def plot_curve_comparison(series_a, series_b, metrics, out_path, title, label_a, label_b, ncols):
-    """One panel per metric, two curves (run A / run B), via the shared `render_figure`."""
+def plot_curve_comparison(series_list, labels, metrics, out_path, title, ncols):
+    """One panel per metric, one curve per run, via the shared `render_figure`.
+
+    `series_list[i]` = {metric: (xs, ys)} for run `i`; `labels[i]` its legend label.
+    """
     import matplotlib.pyplot as plt
 
     history, panels = {}, []
     for m in metrics:
-        has = False
-        if m in series_a:
-            history[f"{m}::A"] = series_a[m]
-            has = True
-        if m in series_b:
-            history[f"{m}::B"] = series_b[m]
-            has = True
-        if not has:
+        curves = []
+        for i, series in enumerate(series_list):
+            if m not in series:
+                continue
+            key = f"{m}::{i}"
+            history[key] = series[m]
+            fmt, color = _run_style(i)
+            curves.append((key, fmt, color, labels[i]))
+        if not curves:
             continue
-        panels.append((pretty(m), pretty(m), [
-            (f"{m}::A", STYLE_A, COLOR_A, label_a),
-            (f"{m}::B", STYLE_B, COLOR_B, label_b),
-        ]))
+        panels.append((pretty(m), pretty(m), curves))
 
     if not panels:
-        print(f"  [skip] {os.path.basename(out_path)} : no metric with data in either run")
+        print(f"  [skip] {os.path.basename(out_path)} : no metric with data in any run")
         return
     fig, _ = render_figure(history, panels=panels, out_path=out_path, title=title,
                            xlabel="round", ncols=ncols)
@@ -173,14 +213,14 @@ def _parse_partition(cols):
 
 
 def _client_bar(ax, metric, runs):
-    """One horizontal bar per client (y = clients); grouped by run when there are two."""
+    """One horizontal bar per client (y = clients); grouped by run when there are several."""
     ids = sorted({cid for _, clients, _ in runs for cid in clients})
     index = {cid: i for i, cid in enumerate(ids)}
     nb = len(runs)
     height = 0.8 / max(nb, 1)
     start = -(nb - 1) / 2.0  # center the run-bars around each client's y position
-    for k, (label, clients, data) in enumerate(runs[::-1]):  # run A first
-        color = (COLOR_A, COLOR_B)[k] if k < 2 else None
+    for k, (label, clients, data) in enumerate(runs):
+        _, color = _run_style(k)
         values = data.get(metric)
         if values is None:
             continue
@@ -200,21 +240,18 @@ def _client_bar(ax, metric, runs):
     ax.grid(axis="x", alpha=0.3)
 
 
-def plot_partition(dir_a, dir_b, label_a, label_b, out_path):
+def plot_partition(dirs, labels, out_path):
     """partition.png : one horizontal bar per client (grouped per run), one panel per metric."""
     import matplotlib.pyplot as plt
 
-    pa = _parse_partition(_cols_or_none(os.path.join(dir_a, "partition.csv")))
-    pb = _parse_partition(_cols_or_none(os.path.join(dir_b, "partition.csv")))
-    if pa is None and pb is None:
-        print("  [skip] partition.png : no partition.csv in either run")
+    runs = []  # (label, clients, data) for each run that has a partition.csv
+    for d, label in zip(dirs, labels):
+        parsed = _parse_partition(_cols_or_none(os.path.join(d, "partition.csv")))
+        if parsed is not None:
+            runs.append((label, parsed[0], parsed[1]))
+    if not runs:
+        print("  [skip] partition.png : no partition.csv in any run")
         return
-
-    runs = []  # (label, clients, data); run B first so run A draws on top of each group
-    if pb is not None:
-        runs.append((label_b, pb[0], pb[1]))
-    if pa is not None:
-        runs.append((label_a, pa[0], pa[1]))
 
     present = {m for _, _, data in runs for m in data}
     metrics = [m for m in PARTITION_METRICS if m in present]
@@ -227,7 +264,7 @@ def plot_partition(dir_a, dir_b, label_a, label_b, out_path):
     for ax, m in zip(axes[0], metrics):
         _client_bar(ax, m, runs)
 
-    fig.suptitle(f"Partition (per client) — {label_a} vs {label_b}",
+    fig.suptitle(f"Partition (per client) — {' vs '.join(labels)}",
                  fontsize=13, fontweight="bold")
     fig.tight_layout(rect=(0, 0, 1, 0.95))
     fig.savefig(out_path, dpi=150)
@@ -240,68 +277,75 @@ def plot_partition(dir_a, dir_b, label_a, label_b, out_path):
 def main():
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("runA", help="first run dir (e.g. 2026-07-07/08-26-24, resolved under outputs/)")
-    p.add_argument("runB", help="second run dir")
+    p.add_argument("runs", nargs="+",
+                   help="one or more run dirs (e.g. 2026-07-07/08-26-24, resolved under outputs/)")
     p.add_argument("--outputs-root", default="outputs", help="base dir for relative run args")
-    p.add_argument("--labels", "--titles", dest="labels", nargs=2, metavar=("TITLE_A", "TITLE_B"),
+    p.add_argument("--labels", "--titles", dest="labels", nargs="+", metavar="LABEL",
                    help="title/label for each run, shown in the suptitle + legends "
-                        "(default: <date>/<time> of each run)")
+                        "(must match the number of runs; default: <date>/<time> of each run)")
     p.add_argument("--metrics", nargs="+", help="explicit client metric columns to plot")
     p.add_argument("--all", action="store_true",
                    help="plot every client metric column (excluding *_step / *_epoch duplicates)")
     p.add_argument("--clients", nargs="+", type=int, help="restrict to these client ids")
-    p.add_argument("--out-dir", help="output dir (default: fl_compare/<slugA>_vs_<slugB>)")
+    p.add_argument("--out-dir", help="output dir (default: fl_result/<slug1>[_vs_<slug2>...])")
     p.add_argument("--ncols", type=int, default=None, help="columns in the curve matrices")
     p.add_argument("--no-clients", action="store_true", help="skip the per-client images")
     p.add_argument("--no-metrics", action="store_true", help="skip metrics.png")
     p.add_argument("--no-partition", action="store_true", help="skip partition.png")
     args = p.parse_args()
 
-    dir_a = _resolve_run_dir(args.runA, args.outputs_root)
-    dir_b = _resolve_run_dir(args.runB, args.outputs_root)
-    label_a = args.labels[0] if args.labels else _short_name(dir_a)
-    label_b = args.labels[1] if args.labels else _short_name(dir_b)
-    out_dir = args.out_dir or os.path.join(
-        "fl_compare", f"{_short_name(dir_a).replace('/', '_')}_vs_{_short_name(dir_b).replace('/', '_')}")
+    dirs = [_resolve_run_dir(r, args.outputs_root) for r in args.runs]
+    if args.labels:
+        if len(args.labels) != len(dirs):
+            raise SystemExit(
+                f"--labels expects {len(dirs)} label(s) to match the runs, got {len(args.labels)}")
+        labels = args.labels
+    else:
+        labels = [_short_name(d) for d in dirs]
+    joined = " vs ".join(labels)
+
+    slugs = [_short_name(d).replace("/", "_") for d in dirs]
+    out_dir = args.out_dir or os.path.join("fl_result", "_vs_".join(slugs))
     os.makedirs(out_dir, exist_ok=True)
-    print(f"Comparing:\n  A = {dir_a}  ({label_a})\n  B = {dir_b}  ({label_b})\nOutput -> {out_dir}")
+    print("Plotting:")
+    for d, label in zip(dirs, labels):
+        print(f"  {label}  <- {d}")
+    print(f"Output -> {out_dir}")
 
     # (1) Per-client curve matrices.
     if not args.no_clients:
-        ids_a, ids_b = set(_client_ids(dir_a)), set(_client_ids(dir_b))
-        common = sorted(ids_a & ids_b)
-        missing = ids_a ^ ids_b
+        id_sets = [set(_client_ids(d)) for d in dirs]
+        common = sorted(set.intersection(*id_sets))
+        missing = sorted(set().union(*id_sets) - set(common))
         if missing:
-            print(f"[warn] clients present in only one run (skipped): {sorted(missing)}")
+            print(f"[warn] clients not present in every run (skipped): {missing}")
         if args.clients:
             common = [c for c in common if c in set(args.clients)]
         for cid in common:
-            cols_a = _cols_or_none(os.path.join(dir_a, f"client_{cid}.csv"))
-            cols_b = _cols_or_none(os.path.join(dir_b, f"client_{cid}.csv"))
+            cols_list = [_cols_or_none(os.path.join(d, f"client_{cid}.csv")) for d in dirs]
             if args.metrics:
                 metrics = args.metrics
             elif args.all:
-                metrics = _discover_all_metrics(cols_a, cols_b)
+                metrics = _discover_all_metrics(*cols_list)
             else:
                 metrics = DEFAULT_CLIENT_METRICS
+            series_list = [_series_from_cols(cols, metrics) for cols in cols_list]
             plot_curve_comparison(
-                _series_from_cols(cols_a, metrics), _series_from_cols(cols_b, metrics), metrics,
+                series_list, labels, metrics,
                 os.path.join(out_dir, f"client_{cid}.png"),
-                title=f"Client {cid} — {label_a} vs {label_b}",
-                label_a=label_a, label_b=label_b, ncols=args.ncols)
+                title=f"Client {cid} — {joined}", ncols=args.ncols)
 
     # (2) Global (server) curve matrix.
     if not args.no_metrics:
+        series_list = [_series_from_cols(_cols_or_none(os.path.join(d, "metrics.csv")), GLOBAL_METRICS)
+                       for d in dirs]
         plot_curve_comparison(
-            _series_from_cols(_cols_or_none(os.path.join(dir_a, "metrics.csv")), GLOBAL_METRICS),
-            _series_from_cols(_cols_or_none(os.path.join(dir_b, "metrics.csv")), GLOBAL_METRICS),
-            GLOBAL_METRICS, os.path.join(out_dir, "metrics.png"),
-            title=f"Global (server) — {label_a} vs {label_b}",
-            label_a=label_a, label_b=label_b, ncols=args.ncols)
+            series_list, labels, GLOBAL_METRICS, os.path.join(out_dir, "metrics.png"),
+            title=f"Global (server) — {joined}", ncols=args.ncols)
 
-    # (3) Partition stacked/grouped bars.
+    # (3) Partition grouped bars.
     if not args.no_partition:
-        plot_partition(dir_a, dir_b, label_a, label_b, os.path.join(out_dir, "partition.png"))
+        plot_partition(dirs, labels, os.path.join(out_dir, "partition.png"))
 
 
 if __name__ == "__main__":

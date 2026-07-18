@@ -2,8 +2,8 @@
 
 Used by:
   - `utils/logger/sinks/plot.py` (RealtimePlotSink, real-time)
-  - any offline script that supplies its own panel spec (e.g. `plot_fl_results.py`,
-    which imports the FL spec from `fl_plot_spec.py`)
+  - any offline script that supplies its own panel spec (e.g. `plot_fl_result.py`,
+    which builds its panels inline)
 
 `history` = dict {canonical_key: (xs, ys)}. A *panel spec* describes the grid;
 when `panels is None`, one panel is auto-created per key in `history`, so the

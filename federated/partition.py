@@ -14,6 +14,7 @@ Two schemes are provided:
   + tiny sites) is distributed to top up the smallest clients so sizes stay homogeneous.
 """
 
+import csv
 import heapq
 import pickle
 import re
@@ -43,6 +44,20 @@ def extract_location(img_path: str) -> str:
     return re.sub(r"[_.]\d+$", "", parent)
 
 
+def extract_camera(img_path: str) -> str:
+    """Derive a camera-level label from an image path.
+
+    Same buckets as `extract_location` but *keeps* the trailing camera suffix
+    (``_NN`` / ``.N``), so cameras of a single site stay distinct
+    (``HoGuom_00`` vs ``HoGuom_01``). Per-identity folders still collapse to
+    ``"other"``.
+    """
+    parent = img_path.rstrip("/").split("/")[-2]
+    if re.fullmatch(r"(?i)person\d+(\.\d+)?", parent):
+        return "other"
+    return parent
+
+
 class _IndexPartitioner:
     """Shared machinery for index-based FL partitioners.
 
@@ -64,29 +79,45 @@ class _IndexPartitioner:
     def client_num_examples(self, client_id: int) -> int:
         return len(self._client_indices[client_id])
 
-    def distribution_matrix(self) -> PrettyTable:
-        """Location x client matrix: sample counts per canonical location per client.
+    def _distribution_counts(
+        self, label_fn=extract_location
+    ) -> Tuple[List[str], Dict[int, Dict[str, int]]]:
+        """Shared counting for the label x client distribution.
 
-        Rows are canonical locations (via `extract_location`), columns are clients plus a
-        row/column total; the last row ("TOTAL") gives the per-client sample count.
+        Returns `(sorted_labels, client_counts)` where `client_counts[cid][label]` is
+        the number of samples of that canonical label (via `label_fn`) held by client
+        `cid`. Single source of truth for `distribution_matrix` (PrettyTable) and
+        `write_distribution_csv` (CSV).
         """
-        client_loc_counts: Dict[int, Dict[str, int]] = {
+        client_counts: Dict[int, Dict[str, int]] = {
             cid: defaultdict(int) for cid in range(self.num_clients)
         }
-        all_locations: set = set()
+        all_labels: set = set()
         for cid, indices in self._client_indices.items():
             for idx in indices:
-                loc = extract_location(self.train_samples[idx][2])
-                client_loc_counts[cid][loc] += 1
-                all_locations.add(loc)
+                label = label_fn(self.train_samples[idx][2])
+                client_counts[cid][label] += 1
+                all_labels.add(label)
+        return sorted(all_labels), client_counts
 
-        displayed_locations = sorted(all_locations)
+    def distribution_matrix(
+        self,
+        label_fn=extract_location,
+        label_name: str = "location",
+    ) -> PrettyTable:
+        """Label x client matrix: sample counts per canonical label per client.
+
+        Rows are canonical labels (via `label_fn`, e.g. `extract_location` for site-level
+        or `extract_camera` for camera-level), columns are clients plus a row/column
+        total; the last row ("TOTAL") gives the per-client sample count.
+        """
+        displayed_locations, client_loc_counts = self._distribution_counts(label_fn)
 
         client_headers = [f"client_{cid}" for cid in range(self.num_clients)]
-        headers = ["location"] + client_headers + ["TOTAL"]
+        headers = [label_name] + client_headers + ["TOTAL"]
         table = PrettyTable(headers)
         table.align = "r"
-        table.align["location"] = "l"
+        table.align[label_name] = "l"
 
         totals_per_client: Dict[int, int] = defaultdict(int)
         for loc in displayed_locations:
@@ -110,6 +141,42 @@ class _IndexPartitioner:
         table.add_row(total_row)
 
         return table
+
+    def write_distribution_csv(
+        self,
+        path: str,
+        label_fn=extract_location,
+        label_name: str = "location",
+    ) -> None:
+        """Persist the label x client distribution matrix to `path` as CSV.
+
+        Same content as `distribution_matrix` (a PrettyTable) but saved to disk: header
+        ``<label_name>,client_0,…,client_{N-1},TOTAL``, one row per label, a final
+        ``TOTAL`` row of per-client totals. Read back by `plot_distribution.py` to render
+        the horizontal stacked bar chart.
+        """
+        labels, client_counts = self._distribution_counts(label_fn)
+        headers = (
+            [label_name]
+            + [f"client_{cid}" for cid in range(self.num_clients)]
+            + ["TOTAL"]
+        )
+        totals_per_client = [0] * self.num_clients
+        with open(path, "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(headers)
+            for label in labels:
+                row: List = [label]
+                label_total = 0
+                for cid in range(self.num_clients):
+                    n = client_counts[cid].get(label, 0)
+                    row.append(n)
+                    totals_per_client[cid] += n
+                    label_total += n
+                row.append(label_total)
+                writer.writerow(row)
+            writer.writerow(["TOTAL"] + totals_per_client + [sum(totals_per_client)])
+        logger.info(f"Saved distribution matrix ({label_name}) to {path}")
 
 
 class IdentityPartitioner(_IndexPartitioner):
@@ -193,9 +260,13 @@ class IdentityPartitioner(_IndexPartitioner):
             f"total_pids={num_pids}  seed={self.seed} ===\n"
             "── Summary ──────────────────────────────────────────────────────\n"
             f"{self.summary()}\n"
-            "── Distribution matrix (samples per location per client) ────────\n"
-            f"{self.distribution_matrix()}"
+            "── Distribution matrix (samples per site per client) ────────────\n"
+            f"{self.distribution_matrix()}\n"
+            "── Distribution matrix (samples per camera per client) ──────────\n"
+            f"{self.distribution_matrix(extract_camera, 'camera')}"
         )
+        self.write_distribution_csv("distribution_site.csv")
+        self.write_distribution_csv("distribution_camera.csv", extract_camera, "camera")
 
     def log_partition_metrics(self, output: str = "partition") -> None:
         """Emit per-client partition stats to a dedicated metrics output (-> `<output>.csv`)."""
@@ -406,9 +477,13 @@ class LocationPartitioner(_IndexPartitioner):
             f"locations={num_locations}  min_samples={self.min_samples}  seed={self.seed} ===\n"
             "── Summary ──────────────────────────────────────────────────────\n"
             f"{self.summary()}\n"
-            "── Distribution matrix (samples per location per client) ────────\n"
-            f"{self.distribution_matrix()}"
+            "── Distribution matrix (samples per site per client) ────────────\n"
+            f"{self.distribution_matrix()}\n"
+            "── Distribution matrix (samples per camera per client) ──────────\n"
+            f"{self.distribution_matrix(extract_camera, 'camera')}"
         )
+        self.write_distribution_csv("distribution_site.csv")
+        self.write_distribution_csv("distribution_camera.csv", extract_camera, "camera")
 
     def log_partition_metrics(self, output: str = "partition") -> None:
         """Emit per-client partition stats to a dedicated metrics output (-> `<output>.csv`)."""

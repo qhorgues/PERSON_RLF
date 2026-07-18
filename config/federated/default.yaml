@@ -31,6 +31,20 @@ stn: # Phase 2 - option (a). Model/data params live in the top-level `stn:` bloc
 
 state_dir: ./fl_state
 
+# GPU memory management: allocate the needed memory once at the start of the run and
+# avoid new CUDA allocations (cudaMalloc / memory_reserved growth) during the rounds.
+memory:
+  cuda_alloc_conf: "expandable_segments:True" # PYTORCH_CUDA_ALLOC_CONF; set at process start, inherited by Ray workers. null -> leave unset
+  cuda_memory_fraction: null # optional hard cap via torch.cuda.set_per_process_memory_fraction (0-1). null -> no cap
+  empty_cache_on_eval: false # false keeps the reserved pool between rounds (no re-cudaMalloc). true = legacy behaviour
+  reuse_model: true # build LitTBPS once per Ray worker process and reuse it across rounds/clients (no per-round rebuild/checkpoint reload)
+  warmup: false # pre-reserve the peak at process start (1 throwaway train step + 1 eval, weights restored). Surfaces OOM at t=0
+  log_gpu_memory: true # log reserved/allocated peaks per round to verify the footprint stays flat
+  oom_retry: # on a shared GPU, wait-and-retry a client fit that hits CUDA OOM instead of failing the round
+    enabled: true # false -> fail fast (server-side guard aborts on a fully-failed round)
+    wait_seconds: 30 # pause between retries, giving co-tenant jobs time to release memory
+    max_retries: null # null -> wait indefinitely until the allocation fits; int -> cap attempts then propagate
+
 client_resources:
   num_gpus: 1.0 # mono-GPU -> clients run sequentially
   num_cpus: 4

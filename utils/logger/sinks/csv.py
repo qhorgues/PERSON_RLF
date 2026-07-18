@@ -1,4 +1,4 @@
-"""CsvSink: metrics -> CSV file (schema compatible with plot_fl_results.py).
+"""CsvSink: metrics -> CSV file (schema read back by plot_fl_result.py).
 
 Dynamic header: if new keys appear (train/val transition, STN metrics...), the
 file is rewritten with the union of columns; otherwise the row is simply

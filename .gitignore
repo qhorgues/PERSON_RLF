@@ -24,3 +24,4 @@ lightning_logs
 *.pt
 *.safetensors
 *.csv
+fl_result

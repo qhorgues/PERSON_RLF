@@ -476,6 +476,24 @@ class LitTBPS(L.LightningModule):
             self.metrics_container.text_ids.append(pid.flatten())
             self.metrics_container.text_feats.append(text_feat)
 
+    def _maybe_empty_cache(self) -> None:
+        """Release the CUDA caching allocator only when explicitly enabled.
+
+        In the federated run we keep the reserved pool intact between rounds (goal:
+        allocate once at start, no cudaMalloc mid-run), so releasing it each eval is
+        gated behind `federated.memory.empty_cache_on_eval` (default False). The
+        centralized path (no `federated` config) keeps the previous always-release
+        behaviour.
+        """
+        federated_cfg = self.config.get("federated", None)
+        if federated_cfg is None:
+            should_empty = True  # centralized run: preserve previous behaviour
+        else:
+            memory_cfg = federated_cfg.get("memory", {})
+            should_empty = bool(memory_cfg.get("empty_cache_on_eval", False))
+        if should_empty and torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
     def on_validation_epoch_start(self) -> None:
         """Initialize validation data containers"""
         self.metrics_container.clear()
@@ -486,7 +504,7 @@ class LitTBPS(L.LightningModule):
             results, _ = self._compute_metrics(return_ranking=False)
             self._log_metrics(results, "val")
             self.metrics_container.clear()
-            torch.cuda.empty_cache()
+            self._maybe_empty_cache()
         except Exception as e:
             logger.error(f"Error in validation epoch end: {str(e)}")
             raise ModelException(f"Validation epoch end failed: {str(e)}")
@@ -611,7 +629,7 @@ class LitTBPS(L.LightningModule):
             self.test_img_data.clear()
             self.test_txt_data.clear()
             self.metrics_container.clear()
-            torch.cuda.empty_cache()
+            self._maybe_empty_cache()
 
         except Exception as e:
             logger.error(f"Error in test epoch end: {str(e)}")

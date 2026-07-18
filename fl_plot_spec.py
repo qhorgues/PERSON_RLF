@@ -1,8 +1,7 @@
 """FL/STN plot spec for TBPS-SigLIP — project-specific (NOT part of the logger core).
 
-Single source of truth for the federated-learning result panels, shared by:
-  - `plot_fl_results.py` (offline, reads results_fl_stn_summary.csv);
-  - `utils/logger/sinks/plot.py` via `sinks.plot.options.spec: fl_plot_spec` (real-time).
+Single source of truth for the federated-learning result panels, consumed by
+`utils/logger/sinks/plot.py` via `sinks.plot.options.spec: fl_plot_spec` (real-time).
 
 Kept out of `utils/logger/` so the logging package stays generic and droppable
 into any project. `utils/logger/plot_panels.render_figure` consumes `PANELS` and

@@ -10,7 +10,7 @@ from flwr.server import ServerApp, ServerAppComponents, ServerConfig
 from utils.logger import log as logger
 from prettytable import PrettyTable
 
-from federated.aggregation import build_strategy
+from federated.aggregation import CommunicationTracker, build_strategy
 from federated.strategy_subspace import SubspaceSelector, build_subspace_selector
 from lightning_models import LitTBPS
 from utils.metrics import rank
@@ -57,8 +57,18 @@ class FederatedServer:
         self.config = config
         self.datamodule = reference_datamodule
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        # Driver/server CUDA context is separate from the Ray client actors; cap it
+        # here too if a fraction is configured (the allocator env var is inherited).
+        from utils.gpu_mem import apply_memory_fraction
+
+        apply_memory_fraction(
+            config.federated.get("memory", {}).get("cuda_memory_fraction", None), self.device
+        )
         self.global_model = self._build_global_model()
         self.selector = self.build_selector()
+        # Accumulates real client<->server fit traffic; read by the trainer after
+        # run_simulation (strategy runs in this same driver process in simulation).
+        self.comm_tracker = CommunicationTracker()
 
     def _build_global_model(self) -> LitTBPS:
         tokenizer = self.datamodule.tokenizer
@@ -105,6 +115,19 @@ class FederatedServer:
             metrics["num_shared_parameters"] = num_shared
             metrics["global_loss"] = loss
 
+            if self.config.federated.get("memory", {}).get("log_gpu_memory", True):
+                from utils.gpu_mem import memory_stats_gib
+
+                mem = memory_stats_gib(self.device)
+                if mem:
+                    logger.info(
+                        f"[round {server_round}] driver GPU mem GiB: "
+                        f"reserved={mem['reserved']:.2f} (peak {mem['max_reserved']:.2f}), "
+                        f"allocated={mem['allocated']:.2f}"
+                    )
+                    metrics["driver_gpu_reserved_gib"] = mem["reserved"]
+                    metrics["driver_gpu_max_reserved_gib"] = mem["max_reserved"]
+
             # fan-out vers la façade (csv / wandb / plot / console selon la config)
             logger.log_metrics(metrics, step=server_round)
 
@@ -117,9 +140,10 @@ class FederatedServer:
         evaluate_fn = self.get_evaluate_fn()
         num_rounds = self.config.federated.num_rounds
         config = self.config
+        comm_tracker = self.comm_tracker
 
         def server_fn(_context: Context) -> ServerAppComponents:
-            strategy = build_strategy(config, initial_parameters, evaluate_fn)
+            strategy = build_strategy(config, initial_parameters, evaluate_fn, comm_tracker)
             return ServerAppComponents(
                 strategy=strategy, config=ServerConfig(num_rounds=num_rounds)
             )

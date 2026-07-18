@@ -11,6 +11,14 @@ Mirrors trainer.py's setup (resolvers, seed, MLM vocab adjustment) and then:
 
 import os
 
+# Configure the CUDA caching allocator before anything can initialise a CUDA context.
+# `expandable_segments` lets the allocator grow existing segments instead of carving
+# new ones, which — together with disabling `empty_cache` between rounds — keeps
+# `memory_reserved` flat over the run (goal: allocate once, no cudaMalloc mid-run).
+# The definitive value is re-applied from config in `run()`; this default just
+# guarantees a sane setting even if an import touches CUDA first.
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+
 import hydra
 from flwr.simulation import run_simulation
 from lightning.pytorch import seed_everything
@@ -62,9 +70,26 @@ def _reconcile_client_count(config: DictConfig, partitioner) -> None:
     )
 
 
+def _configure_cuda_allocator(config: DictConfig) -> None:
+    """Set PYTORCH_CUDA_ALLOC_CONF before any CUDA context initialises.
+
+    Applies to this (driver) process AND — because Ray worker processes inherit the
+    driver's environment when `run_simulation` calls `ray.init` internally — to every
+    client actor. This is the collision-free way to propagate the allocator config to
+    the Ray workers: flwr hardcodes `ray.init(runtime_env=...)`, so passing our own
+    `runtime_env` via `backend_config["init_args"]` would raise a duplicate-kwarg error.
+    """
+    memory_cfg = config.federated.get("memory", {})
+    alloc_conf = memory_cfg.get("cuda_alloc_conf", None)
+    if alloc_conf:
+        os.environ["PYTORCH_CUDA_ALLOC_CONF"] = str(alloc_conf)
+
+
 @hydra.main(version_base="1.3", config_path="config")
 def run(config: DictConfig) -> None:
     OmegaConf.set_struct(config, False)
+    # Must run before seed_everything / any model build can initialise CUDA.
+    _configure_cuda_allocator(config)
     seed_everything(config.seed)
 
     # Modify the config if use MLM
@@ -87,6 +112,13 @@ def run(config: DictConfig) -> None:
     setup_logging(config)
 
     logger.info(f"Federated config:\n{OmegaConf.to_yaml(config.federated)}")
+    logger.info(
+        "GPU memory management: "
+        f"PYTORCH_CUDA_ALLOC_CONF={os.environ.get('PYTORCH_CUDA_ALLOC_CONF', '(unset)')}, "
+        f"reuse_model={config.federated.memory.get('reuse_model', True)}, "
+        f"empty_cache_on_eval={config.federated.memory.get('empty_cache_on_eval', False)}, "
+        f"warmup={config.federated.memory.get('warmup', False)}"
+    )
 
     # Reference data module: full training set, used for partitioning, the
     # global reference model and centralized (global) evaluation.
@@ -135,6 +167,21 @@ def _log_round_history(config: DictConfig, server: FederatedServer) -> None:
         f"subspace={config.federated.subspace} "
         f"({server.selector.num_shared_parameters():,} shared parameters/round)."
     )
+
+    # Coût de communication réel (fit only), écrit une seule fois -> communication.csv
+    tracker = server.comm_tracker
+    summary = tracker.summary(
+        num_shared_parameters=server.selector.num_shared_parameters(),
+        num_rounds=config.federated.num_rounds,
+        num_clients=config.federated.num_clients,
+    )
+    total_mib = summary["fit_total_bytes"] / (1024 ** 2)
+    logger.info(
+        f"[Communication cost] fit total = {total_mib:.2f} MiB "
+        f"(down {tracker.fit_downlink_bytes / 1024 ** 2:.2f} / "
+        f"up {tracker.fit_uplink_bytes / 1024 ** 2:.2f})"
+    )
+    logger.log_metrics(summary, step=config.federated.num_rounds, output="communication")
 
     # ferme tous les sinks (fichier, run W&B, plot, ...)
     logger.close()
